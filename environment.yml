@@ -1,0 +1,34 @@
+# run: conda env create -f environment.yml
+name: genvs
+channels:
+  - pytorch
+  - nvidia
+dependencies:
+  - python>=3.8
+  - pip
+  - pytorch
+  - torchvision=0.7.0
+  - pytorch-cuda=12.1
+  - matplotlib
+  - scikit-image==0.17.2
+  - tqdm
+  - numpy>=1.20
+  - click>=8.0
+  - pillow>=8.3.1
+  - scipy>=1.7.1
+  - psutil
+  - requests
+  - pyparsing==2.4
+  - pip:
+      - wandb
+      - segmentation_models_pytorch
+      - pyhocon
+      - opencv-python
+      - dotmap
+      - tensorboard
+      - imageio
+      - imageio-ffmpeg
+      - ipdb
+      - pretrainedmodels
+      - lpips
+      - pyspng
