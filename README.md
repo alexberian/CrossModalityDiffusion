@@ -8,10 +8,13 @@ University of Arizona
 Accepted to WACV 2025 GeoCV Workshop  
 arXiv: https://arxiv.org/abs/2501.09838
 
+For help running our code, please email jhihyangwu å† arizona ∂ø† edu.  
+If you only want our implementation of GeNVS, checkout the uofa_genvs branch and please consider citing our paper.  
+
 Abstract: Geospatial imaging leverages data from diverse sensing modalities-such as EO, SAR, and LiDAR, ranging from ground-level drones to satellite views. These heterogeneous inputs offer significant opportunities for scene understanding but present challenges in interpreting geometry accurately, particularly in the absence of precise ground truth data. To address this, we propose CrossModalityDiffusion, a modular framework designed to generate images across different modalities and viewpoints without prior knowledge of scene geometry. CrossModalityDiffusion employs modality-specific encoders that take multiple input images and produce geometry-aware feature volumes that encode scene structure relative to their input camera positions. The space where the feature volumes are placed acts as a common ground for unifying input modalities. These feature volumes are overlapped and rendered into feature images from novel perspectives using volumetric rendering techniques. The rendered feature images are used as conditioning inputs for a modality-specific diffusion model, enabling the synthesis of novel images for the desired output modality. In this paper, we show that jointly training different modules ensures consistent geometric understanding across all modalities within the framework. We validate CrossModalityDiffusion's capabilities on the synthetic ShapeNet cars dataset, demonstrating its effectiveness in generating accurate and consistent novel views across multiple imaging modalities and perspectives.
 
 This is the official repository for our paper, CrossModalityDiffusion.  
-Even though we mention GeNVS throughout our code base, it is our implementation of GeNVS (not official) so it may be different from what the authors of GeNVS have. Just like the authors of GeNVS, we built our project on top of [EDM](https://github.com/NVlabs/edm) from Nvidia. Check their repo out to understand what we changed and what we kept the same. For help running our code, please email jhihyangwu å† arizona ∂ø† edu.
+Even though we mention GeNVS throughout our code base, it is our implementation of GeNVS (not official) so it may be different from what the authors of GeNVS have. Just like the authors of GeNVS, we built our project on top of [EDM](https://github.com/NVlabs/edm) from Nvidia. Check their repo out to understand what we changed and what we kept the same.  
 
 # Environment setup
 
