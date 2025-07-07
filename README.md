@@ -5,7 +5,7 @@ University of Arizona
 
 ![Teaser](readme_imgs/teaser.gif)
 
-Accepted to WACV 2025 GeoCV Workshop  
+Accepted to WACV 2025
 arXiv: https://arxiv.org/abs/2501.09838
 
 For help running our code, please email jhihyangwu å† arizona ∂ø† edu.  
