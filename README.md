@@ -65,7 +65,7 @@ srncars
 
 # Generating a video (inference)
 
-First, download our pretrained weights from https://drive.google.com/drive/folders/1Xhqect85JzOyf8hVRUmNHurwY31SE7uk?usp=sharing, so that geocv_2025_results/weights/training-state.pt and geocv_2025_results/weights/network-snapshot.pkl exists.  
+First, download our pretrained weights from https://www.kaggle.com/datasets/jhihyang/crossmodalitydiffusion-weights, so that geocv_2025_results/weights/training-state.pt and geocv_2025_results/weights/network-snapshot.pkl exists.  
 
 All video generation scripts are in `geocv_2025_results/video/` directory.  
 
