@@ -19,7 +19,7 @@ from genvs.utils.utils import StackedRandomGenerator, edm_sampler, one_step_edm_
 from genvs.models.joint_genvs import JointGeNVS
 
 DOMAINS = ["rgb", "sonar", "lidar_depth", "raysar"]  # available domains
-INPUT_DOMAINS = ["rgb", "sonar", "lidar_depth", "raysar"]  # selected input domains
+INPUT_DOMAINS = ["rgb"]  # selected input domains
 TARGET_DOMAIN = "rgb"  # selected target domain
 
 INPUT_VIEWS = [61, 121]  # which input view indices to use to generate novel views
@@ -29,7 +29,7 @@ assert COND_METHOD in ["normal", "autoreg"]
 DENOISING_STEPS = 1
 
 # where to save output video
-OUT_DIR = os.path.join("output_2", f"{SCENE_INDEX}_steps={DENOISING_STEPS}_cond_method={COND_METHOD}")
+OUT_DIR = os.path.join("output_3", f"{SCENE_INDEX}_steps={DENOISING_STEPS}_cond_method={COND_METHOD}")
 GPU_ID = 0  # which GPU to use
 DATA_PATH = "/workspace/data/srncars/cars"
 CKPT_PATH = "../weights/network-snapshot.pkl"
@@ -112,13 +112,16 @@ def main():
             }
             feature_images = net.models["rgb"].pixel_nerf_net(inputs_encoded, poses[target_views][None],
                                                 focal, z_near, z_far, range_angle_feat_img=range_angle_feat_img[TARGET_DOMAIN])[0]  # (len(target_views), 16, H, W)
+            # 1.5. render height maps
+            height_maps = net.models["rgb"].pixel_nerf_net(inputs_encoded, poses[target_views][None],
+                                                focal, z_near, z_far, range_angle_feat_img=False, render_height_map=True)[0]  # (len(target_views), 16, H, W)
             # 2. use feature images and denoiser to generate novel views
             sampler_fn = edm_sampler if DENOISING_STEPS > 1 else one_step_edm_sampler
             novel_images = sampler_fn(net.models[TARGET_DOMAIN].denoiser, latents.expand(len(target_views), -1, -1, -1), feature_images, None, num_steps=DENOISING_STEPS)  # (len(target_views), 3, H, W)
             novel_images = torch.clamp(novel_images, min=-1, max=1)
             # 3. save video frame(s)
             gt_images = images[TARGET_DOMAIN][target_views]
-            new_frames = torch.cat((feat_img_processor(feature_images), novel_images, gt_images), dim=-1)
+            new_frames = torch.cat((feat_img_processor(feature_images), feat_img_processor(height_maps), novel_images, gt_images), dim=-1)
             video_frames.append(new_frames)
 
             # 4. if autoregressive, encode again for next iter
@@ -154,8 +157,8 @@ def main():
         frame = frame * 127.5 + 127.5  # range 0 to 255
         frame = frame.cpu().detach().numpy()
         assert frame.shape[0] == 1
-        pred = frame[0, :, W:W*2, :]
-        gt = frame[0, :, W*2:, :]
+        pred = frame[0, :, W*2:W*3, :]
+        gt = frame[0, :, W*3:, :]
         assert pred.shape == (H, W, 3) and gt.shape == (H, W, 3)
         cur_ssim = skimage.metrics.structural_similarity(
             pred,
