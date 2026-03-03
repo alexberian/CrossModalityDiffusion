@@ -34,7 +34,8 @@ class PixelNeRFNet(nn.Module):
         self.cam_weighter = create_cam_weighting_object(cam_weighting_method)
 
     def forward(self, inputs_encoded, target_poses,
-                focal, z_near, z_far, range_angle_feat_img, samples_per_ray=64, render_height_map=False):
+                focal, z_near, z_far, range_angle_feat_img, samples_per_ray=64, render_height_map=False,
+                height_map_sensor_size=2.0):
         """
         Forward pass for pixelNeRF.
 
@@ -56,9 +57,36 @@ class PixelNeRFNet(nn.Module):
             _, num_input_views, feat_dim, num_depths, H, W = inputs_encoded[0].shape
             num_scenes, num_target_views, _, _ = target_poses.shape
 
-            # generate points in 3D space to sample for latents later
-            rays = utils.gen_rays(target_poses.reshape(num_scenes*num_target_views, 4, 4),
-                                H//2, W//2, focal, device=target_poses.device)  # (num_scenes * num_target_views, H//2, W//2, 6)
+            # override target_poses: one camera above the scene at (0, 0, 1.3) looking straight down
+            # u=(+x), v=(+y), w=(+z) — rays fire in the -w direction = (0, 0, -1) world
+            overhead_pose = torch.eye(4, device=target_poses.device)
+            overhead_pose[2, 3] = 1.3
+            target_poses = overhead_pose.reshape(1, 1, 4, 4).expand(num_scenes, num_target_views, 4, 4).contiguous()
+
+            # generate orthographic rays (parallel, spread across sensor plane)
+            aspect_ratio = (W // 2) / (H // 2)
+            x_ortho = torch.linspace(-height_map_sensor_size / 2 * aspect_ratio,
+                                      height_map_sensor_size / 2 * aspect_ratio,
+                                      steps=W // 2, device=target_poses.device)
+            y_ortho = torch.linspace( height_map_sensor_size / 2,
+                                     -height_map_sensor_size / 2,
+                                      steps=H // 2, device=target_poses.device)
+            grid_x, grid_y = torch.meshgrid(x_ortho, y_ortho, indexing="xy")  # (H//2, W//2)
+
+            R = overhead_pose[:3, :3]  # (3, 3)
+            cam_pos = overhead_pose[:3, 3]  # (3,)
+
+            # origins: cam_pos + R @ [x_offset, y_offset, 0] per pixel
+            pixel_offsets = torch.stack([grid_x, grid_y, torch.zeros_like(grid_x)], dim=-1)  # (H//2, W//2, 3)
+            pixel_offsets = (R @ pixel_offsets.unsqueeze(-1)).squeeze(-1)  # (H//2, W//2, 3)
+            origins = cam_pos.reshape(1, 1, 3) + pixel_offsets  # (H//2, W//2, 3)
+            origins = origins.unsqueeze(0).expand(num_scenes * num_target_views, -1, -1, -1)  # (N*T, H//2, W//2, 3)
+
+            # directions: all identical, pointing in -w direction
+            direction = R @ torch.tensor([0., 0., -1.], device=target_poses.device)  # (3,)
+            directions = direction.reshape(1, 1, 1, 3).expand(num_scenes * num_target_views, H // 2, W // 2, 3)
+
+            rays = torch.cat([origins, directions], dim=-1)  # (N*T, H//2, W//2, 6)
             pts, times = utils.gen_pts_from_rays(rays, z_near, z_far, samples_per_ray)  # (num_scenes * num_target_views, H//2, W//2, samples_per_ray, 3)
             times = times.reshape(num_scenes, num_target_views, H//2, W//2, samples_per_ray)
             pts = pts.reshape(num_scenes, 1, num_target_views, H//2, W//2, samples_per_ray, 3, 1)
