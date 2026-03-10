@@ -105,7 +105,7 @@ def main():
             # 1.5. render height maps
             height_maps_result = net.models["rgb"].pixel_nerf_net(inputs_encoded, poses[target_views][None],
                                                 focal, z_near, z_far, range_angle_feat_img=False, render_height_map=True)
-            height_maps = height_maps_result[0][0]  # depth scaled renders, (len(target_views), 16, H, W)
+            height_scaled_feat_imgs = height_maps_result[0][0]  # depth scaled renders, (len(target_views), 16, H, W)
             depth_maps = height_maps_result[1][0]  # depths, (len(target_views), 1, H, W)
             # 2. use feature images and denoiser to generate novel views
             sampler_fn = edm_sampler if DENOISING_STEPS > 1 else one_step_edm_sampler
@@ -117,7 +117,7 @@ def main():
             depth_vis = depth_maps - depth_maps.min()
             depth_vis = depth_vis / (depth_vis.max() + 1e-6) * 2 - 1  # [-1, 1]
             depth_vis = depth_vis.expand(-1, 3, -1, -1)  # (len(target_views), 3, H, W)
-            new_frames = torch.cat((feat_img_processor(feature_images), depth_vis, feat_img_processor(height_maps), novel_images, gt_images), dim=-1)
+            new_frames = torch.cat((feat_img_processor(feature_images), depth_vis, feat_img_processor(height_scaled_feat_imgs), novel_images, gt_images), dim=-1)
             video_frames.append(new_frames)
     
     # report PSNR and SSIM
@@ -178,18 +178,26 @@ def main():
         for target_views in tqdm(torch.split(all_target_views, batch_size), desc="High-res"):
             hires_result = net.models["rgb"].pixel_nerf_net(inputs_encoded, poses[target_views][None],
                                                 focal, z_near, z_far, range_angle_feat_img=False, render_height_map=True, high_res=True)
-            hires_height = hires_result[0][0]  # (len(target_views), 16, 512, 512)
+            hires_height_scaled_feat_imgs = hires_result[0][0]  # (len(target_views), 16, 512, 512)
             hires_depth = hires_result[1][0]   # (len(target_views), 1, 512, 512)
 
             # process height map to 3-channel [-1, 1]
-            hires_height_vis = feat_img_processor(hires_height)  # (len(target_views), 3, 512, 512)
+            hires_height_scaled_feat_imgs_vis = feat_img_processor(hires_height_scaled_feat_imgs)  # (len(target_views), 3, 512, 512)
             # process depth map to 3-channel [-1, 1]
             hires_depth_vis = hires_depth - hires_depth.min()
             hires_depth_vis = hires_depth_vis / (hires_depth_vis.max() + 1e-6) * 2 - 1
             hires_depth_vis = hires_depth_vis.expand(-1, 3, -1, -1)
 
-            # concat side by side: depth | height -> (len(target_views), 3, 512, 1024)
-            frame = torch.cat((hires_depth_vis, hires_height_vis), dim=-1)
+            # create mask: 0 where any channel < 5 (uint8), 1 otherwise
+            threshold = 10 / 127.5 - 1  # convert uint8 threshold to [-1, 1] range
+            mask = ((hires_height_scaled_feat_imgs_vis[:, 0:1, :, :] >= threshold) &
+                    (hires_height_scaled_feat_imgs_vis[:, 1:2, :, :] >= threshold) &
+                    (hires_height_scaled_feat_imgs_vis[:, 2:3, :, :] >= threshold)).float()
+            mask_vis = mask.expand(-1, 3, -1, -1) * 2 - 1  # 0->-1 (black), 1->1 (white)
+            masked_depth_vis = hires_depth_vis * mask.expand(-1, 3, -1, -1)
+
+            # concat side by side: depth | height | mask | masked depth
+            frame = torch.cat((hires_depth_vis, hires_height_scaled_feat_imgs_vis, mask_vis, masked_depth_vis), dim=-1)
             hires_video_frames.append(frame)
 
     hires_video_frames = torch.cat(hires_video_frames, dim=0)  # (num_frames, 3, 512, 1024)
