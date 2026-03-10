@@ -180,6 +180,13 @@ class PixelNeRFNet(nn.Module):
             depth = F.interpolate(depth, size=(out_H, out_W), mode='bilinear', align_corners=False)
             depth = depth.reshape(num_scenes, num_target_views, 1, out_H, out_W)
 
+            # compute accumulated opacity (sum of weights along each ray)
+            opacity = weights.sum(dim=-1)  # (num_scenes, num_target_views, ray_H, ray_W)
+            opacity = opacity.unsqueeze(-1).permute(0, 1, 4, 2, 3)  # (num_scenes, num_target_views, 1, ray_H, ray_W)
+            opacity = opacity.reshape(num_scenes * num_target_views, 1, ray_H, ray_W)
+            opacity = F.interpolate(opacity, size=(out_H, out_W), mode='bilinear', align_corners=False)
+            opacity = opacity.reshape(num_scenes, num_target_views, 1, out_H, out_W)
+
             # use depth to scale the intensity of the renders
             # normalize: closer to camera (smaller depth) = brighter
             
@@ -190,7 +197,7 @@ class PixelNeRFNet(nn.Module):
             depth = 1.0 - depth  # invert so closer = brighter
             renders = renders * depth
 
-            return renders, depth  # (num_scenes, num_target_views, num_channels, H, W)
+            return renders, depth, opacity  # (num_scenes, num_target_views, num_channels, H, W)
 
         # for efficiency, only shoot (H//2, W//2) rays per novel view and then upsample to (H, W) like GeNVS
         _, num_input_views, feat_dim, num_depths, H, W = inputs_encoded[0].shape

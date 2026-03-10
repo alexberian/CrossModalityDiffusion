@@ -180,6 +180,7 @@ def main():
                                                 focal, z_near, z_far, range_angle_feat_img=False, render_height_map=True, high_res=True)
             hires_height_scaled_feat_imgs = hires_result[0][0]  # (len(target_views), 16, 512, 512)
             hires_depth = hires_result[1][0]   # (len(target_views), 1, 512, 512)
+            hires_opacity = hires_result[2][0]  # (len(target_views), 1, 512, 512)
 
             # process height map to 3-channel [-1, 1]
             hires_height_scaled_feat_imgs_vis = feat_img_processor(hires_height_scaled_feat_imgs)  # (len(target_views), 3, 512, 512)
@@ -188,16 +189,39 @@ def main():
             hires_depth_vis = hires_depth_vis / (hires_depth_vis.max() + 1e-6) * 2 - 1
             hires_depth_vis = hires_depth_vis.expand(-1, 3, -1, -1)
 
-            # create mask: 0 where any channel < 5 (uint8), 1 otherwise
+            # create color-based mask: 0 where any channel < 10 (uint8), 1 otherwise
             threshold = 10 / 127.5 - 1  # convert uint8 threshold to [-1, 1] range
             mask = ((hires_height_scaled_feat_imgs_vis[:, 0:1, :, :] >= threshold) &
                     (hires_height_scaled_feat_imgs_vis[:, 1:2, :, :] >= threshold) &
                     (hires_height_scaled_feat_imgs_vis[:, 2:3, :, :] >= threshold)).float()
             mask_vis = mask.expand(-1, 3, -1, -1) * 2 - 1  # 0->-1 (black), 1->1 (white)
-            masked_depth_vis = hires_depth_vis * mask.expand(-1, 3, -1, -1)
+            mask3 = mask.expand(-1, 3, -1, -1)
+            masked_depth = hires_depth_vis * mask3
+            # normalize masked depth to full [-1, 1] range using only masked pixels
+            masked_vals = masked_depth[mask3 > 0]
+            if masked_vals.numel() > 0:
+                masked_depth_vis = masked_depth.clone()
+                masked_depth_vis[mask3 > 0] = (masked_vals - masked_vals.min()) / (masked_vals.max() - masked_vals.min() + 1e-6) * 2 - 1
+            else:
+                masked_depth_vis = masked_depth
 
-            # concat side by side: depth | height | mask | masked depth
-            frame = torch.cat((hires_depth_vis, hires_height_scaled_feat_imgs_vis, mask_vis, masked_depth_vis), dim=-1)
+            # create opacity-based mask from volume rendering accumulated alpha
+            # normalize opacity to [0, 1] per frame then threshold
+            opacity_norm = hires_opacity / (hires_opacity.max() + 1e-6)
+            opacity_mask = (opacity_norm > 0.15).float()  # (len(target_views), 1, 512, 512)
+            opacity_mask_vis = opacity_mask.expand(-1, 3, -1, -1) * 2 - 1  # 0->-1 (black), 1->1 (white)
+            opacity_mask3 = opacity_mask.expand(-1, 3, -1, -1)
+            opacity_masked_depth = hires_depth_vis * opacity_mask3
+            # normalize opacity masked depth to full [-1, 1] range using only masked pixels
+            opacity_masked_vals = opacity_masked_depth[opacity_mask3 > 0]
+            if opacity_masked_vals.numel() > 0:
+                opacity_masked_depth_vis = opacity_masked_depth.clone()
+                opacity_masked_depth_vis[opacity_mask3 > 0] = (opacity_masked_vals - opacity_masked_vals.min()) / (opacity_masked_vals.max() - opacity_masked_vals.min() + 1e-6) * 2 - 1
+            else:
+                opacity_masked_depth_vis = opacity_masked_depth
+
+            # concat side by side: depth | height | mask | masked depth | opacity mask | opacity masked depth
+            frame = torch.cat((hires_depth_vis, hires_height_scaled_feat_imgs_vis, mask_vis, masked_depth_vis, opacity_mask_vis, opacity_masked_depth_vis), dim=-1)
             hires_video_frames.append(frame)
 
     hires_video_frames = torch.cat(hires_video_frames, dim=0)  # (num_frames, 3, 512, 1024)
