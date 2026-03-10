@@ -195,7 +195,6 @@ class PixelNeRFNet(nn.Module):
             # depth = torch.clamp(depth, min_z, max_z)
             depth = (depth - min_z) / (max_z - min_z)  # normalize to [0, 1]
             depth = 1.0 - depth  # invert so closer = brighter
-            renders = renders * depth
 
             return renders, depth, opacity  # (num_scenes, num_target_views, num_channels, H, W)
 
