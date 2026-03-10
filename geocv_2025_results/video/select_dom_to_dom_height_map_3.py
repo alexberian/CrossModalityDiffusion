@@ -11,6 +11,7 @@ import imageio
 import skimage.metrics
 from tqdm import tqdm
 import numpy as np
+import torch.nn.functional as F
 sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 )
@@ -24,12 +25,10 @@ TARGET_DOMAIN = "rgb"  # selected target domain
 
 INPUT_VIEWS = [61, 121]  # which input view indices to use to generate novel views
 SCENE_INDEX = 10  # which scene to use
-COND_METHOD = "normal"  # which method to use for conditioning GeNVS
-assert COND_METHOD in ["normal", "autoreg"]
 DENOISING_STEPS = 1
 
 # where to save output video
-OUT_DIR = os.path.join("output_3", f"{SCENE_INDEX}_steps={DENOISING_STEPS}_cond_method={COND_METHOD}")
+OUT_DIR = os.path.join("output_3", f"{SCENE_INDEX}_steps={DENOISING_STEPS}")
 GPU_ID = 0  # which GPU to use
 DATA_PATH = "/workspace/data/srncars/cars"
 CKPT_PATH = "../weights/network-snapshot.pkl"
@@ -71,17 +70,8 @@ def main():
 
     # figure out real batch size to use
     batch_size = 1
-    assert COND_METHOD == "normal"
-    #if COND_METHOD == "autoreg":
-    #    batch_size = 1  # if autoreg, batch size must be 1 because next view is conditioned on prev generated view
-    #    prev_output = []
-    #    prev_poses = []
-    #else:
-    #    assert COND_METHOD == "normal"
-    #    batch_size = 1  # JointGeNVS asserts number of target views be 1 at all times
 
     # encode input views
-
     # encode input views from all input domains and merge them
     in_encs = []
     for dom in INPUT_DOMAINS:
@@ -113,40 +103,22 @@ def main():
             feature_images = net.models["rgb"].pixel_nerf_net(inputs_encoded, poses[target_views][None],
                                                 focal, z_near, z_far, range_angle_feat_img=range_angle_feat_img[TARGET_DOMAIN])[0]  # (len(target_views), 16, H, W)
             # 1.5. render height maps
-            height_maps = net.models["rgb"].pixel_nerf_net(inputs_encoded, poses[target_views][None],
-                                                focal, z_near, z_far, range_angle_feat_img=False, render_height_map=True)[0]  # (len(target_views), 16, H, W)
+            height_maps_result = net.models["rgb"].pixel_nerf_net(inputs_encoded, poses[target_views][None],
+                                                focal, z_near, z_far, range_angle_feat_img=False, render_height_map=True)
+            height_maps = height_maps_result[0][0]  # depth scaled renders, (len(target_views), 16, H, W)
+            depth_maps = height_maps_result[1][0]  # depths, (len(target_views), 1, H, W)
             # 2. use feature images and denoiser to generate novel views
             sampler_fn = edm_sampler if DENOISING_STEPS > 1 else one_step_edm_sampler
             novel_images = sampler_fn(net.models[TARGET_DOMAIN].denoiser, latents.expand(len(target_views), -1, -1, -1), feature_images, None, num_steps=DENOISING_STEPS)  # (len(target_views), 3, H, W)
             novel_images = torch.clamp(novel_images, min=-1, max=1)
             # 3. save video frame(s)
             gt_images = images[TARGET_DOMAIN][target_views]
-            new_frames = torch.cat((feat_img_processor(feature_images), feat_img_processor(height_maps), novel_images, gt_images), dim=-1)
+            # normalize depth maps to [-1, 1] for visualization and expand to 3 channels
+            depth_vis = depth_maps - depth_maps.min()
+            depth_vis = depth_vis / (depth_vis.max() + 1e-6) * 2 - 1  # [-1, 1]
+            depth_vis = depth_vis.expand(-1, 3, -1, -1)  # (len(target_views), 3, H, W)
+            new_frames = torch.cat((feat_img_processor(feature_images), depth_vis, feat_img_processor(height_maps), novel_images, gt_images), dim=-1)
             video_frames.append(new_frames)
-
-            # 4. if autoregressive, encode again for next iter
-            assert COND_METHOD == "normal"
-            #if COND_METHOD == "autoreg":
-            #    prev_output.append(novel_images)  # appended (1, 3, H, W)
-            #    prev_poses.append(poses[target_views])  # appended (1, 4, 4)
-            #    # prepare images to encode
-            #    to_encode_imgs = []
-            #    to_encode_poses = []
-            #    to_encode_imgs.append(images[input_views])  # original input images
-            #    to_encode_poses.append(poses[input_views])
-            #    to_encode_imgs.append(novel_images)  # last output
-            #    to_encode_poses.append(poses[target_views])
-            #    # 5 random previous outputs
-            #    if len(prev_output) > 1:
-            #        indices = np.random.choice(list(range(len(prev_output) - 1)), replace=False, size=min(len(prev_output) - 1, 5))
-            #        for i in indices:
-            #            to_encode_imgs.append(prev_output[i])
-            #            to_encode_poses.append(prev_poses[i])
-            #    # concatenate and finally encode
-            #    to_encode_imgs = torch.cat(to_encode_imgs, dim=0).to(torch.float32)
-            #    to_encode_poses = torch.cat(to_encode_poses, dim=0).to(torch.float32)
-            #    inputs_encoded = net.pixel_nerf_net.encode_input_views(to_encode_imgs[None],
-            #                                                        to_encode_poses[None])
     
     # report PSNR and SSIM
     all_ssim = []
@@ -157,8 +129,8 @@ def main():
         frame = frame * 127.5 + 127.5  # range 0 to 255
         frame = frame.cpu().detach().numpy()
         assert frame.shape[0] == 1
-        pred = frame[0, :, W*2:W*3, :]
-        gt = frame[0, :, W*3:, :]
+        pred = frame[0, :, W*3:W*4, :]
+        gt = frame[0, :, W*4:, :]
         assert pred.shape == (H, W, 3) and gt.shape == (H, W, 3)
         cur_ssim = skimage.metrics.structural_similarity(
             pred,
@@ -199,6 +171,34 @@ def main():
                     fps=30,
                     quality=8)
     print("Successfully wrote video to", video_path)
+
+    # generate high-res 512x512 depth + height map video (two columns, 1024x512)
+    hires_video_frames = []
+    with torch.no_grad():
+        for target_views in tqdm(torch.split(all_target_views, batch_size), desc="High-res"):
+            hires_result = net.models["rgb"].pixel_nerf_net(inputs_encoded, poses[target_views][None],
+                                                focal, z_near, z_far, range_angle_feat_img=False, render_height_map=True, high_res=True)
+            hires_height = hires_result[0][0]  # (len(target_views), 16, 512, 512)
+            hires_depth = hires_result[1][0]   # (len(target_views), 1, 512, 512)
+
+            # process height map to 3-channel [-1, 1]
+            hires_height_vis = feat_img_processor(hires_height)  # (len(target_views), 3, 512, 512)
+            # process depth map to 3-channel [-1, 1]
+            hires_depth_vis = hires_depth - hires_depth.min()
+            hires_depth_vis = hires_depth_vis / (hires_depth_vis.max() + 1e-6) * 2 - 1
+            hires_depth_vis = hires_depth_vis.expand(-1, 3, -1, -1)
+
+            # concat side by side: depth | height -> (len(target_views), 3, 512, 1024)
+            frame = torch.cat((hires_depth_vis, hires_height_vis), dim=-1)
+            hires_video_frames.append(frame)
+
+    hires_video_frames = torch.cat(hires_video_frames, dim=0)  # (num_frames, 3, 512, 1024)
+    hires_video_frames = torch.permute(hires_video_frames, (0, 2, 3, 1))
+    hires_video_frames = torch.clip(hires_video_frames, -1, 1)
+    hires_video_frames = (hires_video_frames * 127.5 + 127.5).cpu().numpy().astype(np.uint8)
+    hires_video_path = os.path.join(OUT_DIR, "depth_height_hires.mp4")
+    imageio.mimwrite(hires_video_path, hires_video_frames, fps=30, quality=8)
+    print(f"Saved high-res depth+height video to {hires_video_path}")
 
 if __name__ == "__main__":
     main()

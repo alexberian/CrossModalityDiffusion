@@ -34,8 +34,8 @@ class PixelNeRFNet(nn.Module):
         self.cam_weighter = create_cam_weighting_object(cam_weighting_method)
 
     def forward(self, inputs_encoded, target_poses,
-                focal, z_near, z_far, range_angle_feat_img, samples_per_ray=64, render_height_map=False,
-                height_map_sensor_size=2.0):
+                focal, z_near, z_far, range_angle_feat_img, samples_per_ray=64, render_depth_map=False, render_height_map=False,
+                height_map_sensor_size=2.0, high_res=False):
         """
         Forward pass for pixelNeRF.
 
@@ -53,43 +53,32 @@ class PixelNeRFNet(nn.Module):
             renders (tensor): predicted novel view .shape=(num_scenes, num_target_views, num_channels, H, W)
         """
         if render_height_map:
-            # for efficiency, only shoot (H//2, W//2) rays per novel view and then upsample to (H, W) like GeNVS
             _, num_input_views, feat_dim, num_depths, H, W = inputs_encoded[0].shape
             num_scenes, num_target_views, _, _ = target_poses.shape
 
-            # override target_poses: one camera above the scene at (0, 0, 1.3) looking straight down
-            # u=(+x), v=(+y), w=(+z) — rays fire in the -w direction = (0, 0, -1) world
-            overhead_pose = torch.eye(4, device=target_poses.device)
-            overhead_pose[2, 3] = 1.3
-            target_poses = overhead_pose.reshape(1, 1, 4, 4).expand(num_scenes, num_target_views, 4, 4).contiguous()
+            # ray resolution: high_res shoots 256x256 rays -> 512x512 output, normal shoots H//2 x W//2 -> H x W
+            if high_res:
+                ray_H, ray_W = 256, 256
+                out_H, out_W = 512, 512
+            else:
+                ray_H, ray_W = H // 2, W // 2
+                out_H, out_W = H, W
 
-            # generate orthographic rays (parallel, spread across sensor plane)
-            aspect_ratio = (W // 2) / (H // 2)
-            x_ortho = torch.linspace(-height_map_sensor_size / 2 * aspect_ratio,
-                                      height_map_sensor_size / 2 * aspect_ratio,
-                                      steps=W // 2, device=target_poses.device)
-            y_ortho = torch.linspace( height_map_sensor_size / 2,
-                                     -height_map_sensor_size / 2,
-                                      steps=H // 2, device=target_poses.device)
-            grid_x, grid_y = torch.meshgrid(x_ortho, y_ortho, indexing="xy")  # (H//2, W//2)
+            # lock the target pose to bird eye view where head of car is down and back of car is top
+            # target_poses[0][0] = torch.tensor([
+            #     [-1, 0, 0, 0],
+            #     [0, -1, 0, 0],
+            #     [0, 0, 1, 1.3],
+            #     [0, 0, 0, 1]
+            # ], dtype=torch.float32, device=target_poses.device)
+            # ===
 
-            R = overhead_pose[:3, :3]  # (3, 3)
-            cam_pos = overhead_pose[:3, 3]  # (3,)
-
-            # origins: cam_pos + R @ [x_offset, y_offset, 0] per pixel
-            pixel_offsets = torch.stack([grid_x, grid_y, torch.zeros_like(grid_x)], dim=-1)  # (H//2, W//2, 3)
-            pixel_offsets = (R @ pixel_offsets.unsqueeze(-1)).squeeze(-1)  # (H//2, W//2, 3)
-            origins = cam_pos.reshape(1, 1, 3) + pixel_offsets  # (H//2, W//2, 3)
-            origins = origins.unsqueeze(0).expand(num_scenes * num_target_views, -1, -1, -1)  # (N*T, H//2, W//2, 3)
-
-            # directions: all identical, pointing in -w direction
-            direction = R @ torch.tensor([0., 0., -1.], device=target_poses.device)  # (3,)
-            directions = direction.reshape(1, 1, 1, 3).expand(num_scenes * num_target_views, H // 2, W // 2, 3)
-
-            rays = torch.cat([origins, directions], dim=-1)  # (N*T, H//2, W//2, 6)
-            pts, times = utils.gen_pts_from_rays(rays, z_near, z_far, samples_per_ray)  # (num_scenes * num_target_views, H//2, W//2, samples_per_ray, 3)
-            times = times.reshape(num_scenes, num_target_views, H//2, W//2, samples_per_ray)
-            pts = pts.reshape(num_scenes, 1, num_target_views, H//2, W//2, samples_per_ray, 3, 1)
+            # generate points in 3D space to sample for latents later
+            rays = utils.gen_rays(target_poses.reshape(num_scenes*num_target_views, 4, 4),
+                                ray_H, ray_W, focal, device=target_poses.device)
+            pts, times = utils.gen_pts_from_rays(rays, z_near, z_far, samples_per_ray)
+            times = times.reshape(num_scenes, num_target_views, ray_H, ray_W, samples_per_ray)
+            pts = pts.reshape(num_scenes, 1, num_target_views, ray_H, ray_W, samples_per_ray, 3, 1)
             pts = torch.cat((pts, torch.ones_like(pts)[..., :1, :]), dim=-2)  # convert to homogenous coords (..., 4, 1)
 
             # project the points in 3D space to local coordinates 
@@ -119,13 +108,13 @@ class PixelNeRFNet(nn.Module):
                                 mode="bilinear",  # will automatically become trilinear due to 5D input shape
                                 padding_mode="zeros",
                                 align_corners=False)
-            feats = feats.reshape(num_scenes, num_input_views, feat_dim, num_target_views, H//2, W//2, samples_per_ray)
-            
+            feats = feats.reshape(num_scenes, num_input_views, feat_dim, num_target_views, ray_H, ray_W, samples_per_ray)
+
             # combine feats across input views
             weights = self.cam_weighter(input_poses, target_poses).unsqueeze(2)  # (num_scenes, num_input_views, 1, num_target_views)
             feats = weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) * feats
-            feats = torch.sum(feats, dim=1)  # (num_scenes, feat_dim, num_target_views, H//2, W//2, samples_per_ray)
-            feats = torch.permute(feats, (0, 2, 3, 4, 5, 1))  # (num_scenes, num_target_views, H//2, W//2, samples_per_ray, feat_dim)
+            feats = torch.sum(feats, dim=1)
+            feats = torch.permute(feats, (0, 2, 3, 4, 5, 1))  # (num_scenes, num_target_views, ray_H, ray_W, samples_per_ray, feat_dim)
 
             # pass through NeRF MLP
             new_feats = []
@@ -135,7 +124,7 @@ class PixelNeRFNet(nn.Module):
                     buffer.append(self.mlp(feats[i, j]))
                 new_feats.append(torch.stack(buffer, dim=0))
             new_feats = torch.stack(new_feats, dim=0)
-            assert new_feats.shape == (num_scenes, num_target_views, H//2, W//2, samples_per_ray, self.mlp.output_dim)
+            assert new_feats.shape == (num_scenes, num_target_views, ray_H, ray_W, samples_per_ray, self.mlp.output_dim)
 
             density = new_feats[..., 0]
             rgb = new_feats[..., 1:]
@@ -145,15 +134,36 @@ class PixelNeRFNet(nn.Module):
             transmittance = torch.exp(-torch.cumsum(density * deltas, dim=-1))
             weights = alpha * transmittance
             renders = torch.sum(weights[..., None] * rgb, dim=-2)
-            assert renders.shape == (num_scenes, num_target_views, H//2, W//2, self.mlp.output_dim - 1)
-            
-            # upsample from (H//2, W//2) to (H, W)
-            renders = torch.permute(renders, (0, 1, 4, 2, 3))  # (num_scenes, num_target_views, num_channels, H//2, W//2)
-            renders = renders.reshape(num_scenes * num_target_views, -1, H//2, W//2)
-            renders = self.upsampler(renders)
-            renders = renders.reshape(num_scenes, num_target_views, -1, H, W)
+            assert renders.shape == (num_scenes, num_target_views, ray_H, ray_W, self.mlp.output_dim - 1)
 
-            return renders  # (num_scenes, num_target_views, num_channels, H, W)
+            # upsample from (ray_H, ray_W) to (out_H, out_W)
+            renders = torch.permute(renders, (0, 1, 4, 2, 3))  # (num_scenes, num_target_views, num_channels, ray_H, ray_W)
+            renders = renders.reshape(num_scenes * num_target_views, -1, ray_H, ray_W)
+            renders = F.interpolate(renders, size=(out_H, out_W), mode='bilinear', align_corners=False)
+            renders = renders.reshape(num_scenes, num_target_views, -1, out_H, out_W)
+
+            # compute expected depth along each ray
+            # normalize by sum of weights since weights don't sum to 1
+            # times are in focal-normalized space, multiply by focal to get world-space depth
+            depth = torch.sum(weights * times, dim=-1) / (weights.sum(dim=-1) + 1e-8) * focal
+
+            depth = depth.unsqueeze(-1)
+            depth = depth.permute(0, 1, 4, 2, 3)  # (num_scenes, num_target_views, 1, ray_H, ray_W)
+            depth = depth.reshape(num_scenes * num_target_views, 1, ray_H, ray_W)
+            depth = F.interpolate(depth, size=(out_H, out_W), mode='bilinear', align_corners=False)
+            depth = depth.reshape(num_scenes, num_target_views, 1, out_H, out_W)
+
+            # use depth to scale the intensity of the renders
+            # normalize: closer to camera (smaller depth) = brighter
+            
+            depth[depth < min_z] = max_z  # throw out points, don't clamp
+            depth[depth > max_z] = max_z
+            # depth = torch.clamp(depth, min_z, max_z)
+            depth = (depth - min_z) / (max_z - min_z)  # normalize to [0, 1]
+            depth = 1.0 - depth  # invert so closer = brighter
+            renders = renders * depth
+
+            return renders, depth  # (num_scenes, num_target_views, num_channels, H, W)
 
         # for efficiency, only shoot (H//2, W//2) rays per novel view and then upsample to (H, W) like GeNVS
         _, num_input_views, feat_dim, num_depths, H, W = inputs_encoded[0].shape
